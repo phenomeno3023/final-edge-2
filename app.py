@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -128,6 +128,11 @@ KIS_STATS = {
     "quote_messages": 0,
     "last_message_ts": 0.0,
     "last_error": "",
+    "ws_connected_at": 0.0,
+    "subscription_requests": 0,
+    "subscription_acks": 0,
+    "last_subscribed_ticker": "",
+    "last_subscription_ack": "",
 }
 KIS_BRIDGE = None
 KIS_BRIDGE_PID = 0
@@ -360,6 +365,11 @@ def api_kis_status():
         "quote_messages": int(KIS_STATS.get("quote_messages", 0) or 0),
         "last_message_ts": float(KIS_STATS.get("last_message_ts", 0.0) or 0.0),
         "last_error": str(KIS_STATS.get("last_error", "")),
+        "ws_connected_at": float(KIS_STATS.get("ws_connected_at", 0.0) or 0.0),
+        "subscription_requests": int(KIS_STATS.get("subscription_requests", 0) or 0),
+        "subscription_acks": int(KIS_STATS.get("subscription_acks", 0) or 0),
+        "last_subscribed_ticker": str(KIS_STATS.get("last_subscribed_ticker", "")),
+        "last_subscription_ack": str(KIS_STATS.get("last_subscription_ack", "")),
         "approval_url": KIS_APPROVAL_URL,
         "ws_url": KIS_WS_URL,
         "process_pid": os.getpid(),
@@ -519,14 +529,14 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 </style>
 </head>
 <body><div class="wrap">
-<div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.0</div>
+<div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.1.5</div>
 <div class="badges"><div class="badge">KIS 실시간 체결</div><div class="badge">KIS 실시간 호가</div><div class="badge">1분봉 메모리 생성</div><div class="badge">V반전 / 돌파 / 급락 탐지</div><div class="badge">자동주문 없음</div></div></div>
 <div class="grid">
 <div class="card"><h3>ENGINE</h3><div id="engine" class="mono">loading...</div></div>
 <div class="card"><h3>LIVE SIGNALS</h3><div id="signals" class="mono">loading...</div></div>
 </div>
 <div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>매도1</th><th>매수1</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="card" style="margin-top:14px"><div class="muted">V1.1.4는 Render/Gunicorn의 실제 웹 워커에서 KIS bridge를 시작·복구하도록 수정했습니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
+<div class="card" style="margin-top:14px"><div class="muted">V1.1.5는 승인키 로그를 완전 마스킹하고 WebSocket 연결·종목 구독 상태를 안전하게 추적합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
 </div>
 <script>
 function n(v,d=2){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:d})}

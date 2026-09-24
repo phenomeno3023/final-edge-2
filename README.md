@@ -1,26 +1,32 @@
-# FINAL EDGE 2 V1.1.4 — Render/Gunicorn Worker Fix
+# FINAL EDGE 2 V1.1.5 — Safe Logs + Subscription Verification
 
-원인
-- 이전 버전은 모듈 import 시 KIS background thread를 시작했습니다.
-- Render/Gunicorn 배포 과정에서는 앱이 실제 서비스 worker가 아닌 임시/부모 process에서 먼저 import될 수 있습니다.
-- 그 process가 종료되면 KIS thread도 같이 사라져 `/api/kis/status`에서 `bridge_thread_alive=false`가 남았습니다.
-
-수정
-- 모듈 import 시 KIS thread 시작 제거
-- 실제 HTTP 요청을 처리하는 worker에서 `ensure_kis_bridge()` 실행
-- PID가 바뀌었거나 thread가 죽었으면 자동 재시작
-- `/api/kis/status`에 `process_pid`, `bridge_pid`, `bridge_started_at` 추가
-- KIS 승인키/HTTP 진단 기능은 V1.1.3 그대로 유지
-- App Key / App Secret 실제 값은 로그/API에 출력하지 않음
+핵심 수정
+- KIS 승인키 응답 로그에서 `approval_key` 완전 마스킹
+- credential/token 계열 키를 재귀적으로 `***REDACTED***` 처리
+- credential endpoint의 비-JSON 응답 본문은 로그에 출력하지 않음
+- WebSocket 연결 성공/해제 로그 추가
+- 종목별 체결+호가 구독 요청 로그 추가
+- 구독 ACK 성공/실패 상태 기록
+- `/api/kis/status`에 다음 안전한 진단값 추가:
+  - ws_connected_at
+  - subscription_requests
+  - subscription_acks
+  - last_subscribed_ticker
+  - last_subscription_ack
+- App Key / App Secret / approval_key 실제 값은 로그/API에 출력하지 않음
 - 자동주문 없음
 
-배포 후 확인
-1. FINAL EDGE 2를 새로고침
-2. 3~5초 대기
-3. `https://final-edge-2.onrender.com/api/kis/status`
-4. 기대:
-   - configured=true
-   - bridge_thread_alive=true
-   - process_pid == bridge_pid
-   - approval_ready=true (승인키 성공 시)
-   - connected=true (WebSocket 성공 시)
+현재 테스트용 `EDGE2_BOOTSTRAP`을 유지하면 삼성전자(005930) 구독 검증에 사용할 수 있습니다.
+
+배포 후 기대값
+- VERSION 1.1.5
+- KIS CONNECTED
+- WATCH 1
+- KIS SUBS 1
+- `/api/kis/status`에서:
+  - approval_ready=true
+  - connected=true
+  - bridge_thread_alive=true
+  - subscriptions=1
+  - subscription_requests=2
+  - subscription_acks가 1 이상이면 KIS 구독 ACK 확인

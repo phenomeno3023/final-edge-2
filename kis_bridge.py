@@ -11,6 +11,33 @@ def _num(v,d=0.0):
     try:return float(str(v).replace(",","").strip())
     except:return d
 
+_SENSITIVE_KEYS = {
+    "approval_key", "appkey", "app_key", "secretkey", "appsecret",
+    "app_secret", "access_token", "token", "authorization"
+}
+
+def _sanitize(value):
+    """Return a log-safe copy with credentials/tokens redacted."""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if str(k).lower() in _SENSITIVE_KEYS:
+                out[k] = "***REDACTED***"
+            else:
+                out[k] = _sanitize(v)
+        return out
+    if isinstance(value, list):
+        return [_sanitize(x) for x in value]
+    return value
+
+def _safe_response_preview(response):
+    try:
+        data = response.json()
+        return json.dumps(_sanitize(data), ensure_ascii=False)[:500]
+    except Exception:
+        # Do not emit raw non-JSON bodies from credential endpoints.
+        return "<non-json response omitted>"
+
 class KISRealtimeBridge:
     def __init__(self,app_key,app_secret,symbol_provider,on_tick,on_quote,status,ws_url="ws://ops.koreainvestment.com:21000",approval_url="https://openapi.koreainvestment.com:9443/oauth2/Approval"):
         self.app_key=app_key; self.app_secret=app_secret; self.symbol_provider=symbol_provider; self.on_tick=on_tick; self.on_quote=on_quote; self.status=status; self.ws_url=ws_url; self.approval_url=approval_url; self._stop=threading.Event(); self._thread=None
@@ -44,7 +71,7 @@ class KISRealtimeBridge:
             print(f"[EDGE2][KIS] {msg}", flush=True)
             raise
 
-        body_preview = (r.text or "").strip().replace("\n", " ")[:500]
+        body_preview = _safe_response_preview(r)
         print(f"[EDGE2][KIS] approval HTTP {r.status_code} body={body_preview}", flush=True)
 
         if not r.ok:
@@ -81,11 +108,21 @@ class KISRealtimeBridge:
         await ws.send(self._sub_msg(key,TR_TICK,ticker)); await asyncio.sleep(.08); await ws.send(self._sub_msg(key,TR_QUOTE,ticker)); await asyncio.sleep(.08)
     async def _run_once(self):
         self.status["approval_ready"]=False; key=await asyncio.to_thread(self._approval_key); subscribed=set()
+        print(f"[EDGE2][KIS] connecting WebSocket {self.ws_url}", flush=True)
         async with websockets.connect(self.ws_url,ping_interval=None,close_timeout=5,open_timeout=10) as ws:
-            self.status["connected"]=True; self.status["last_error"]=""
+            self.status["connected"]=True
+            self.status["last_error"]=""
+            self.status["ws_connected_at"]=time.time()
+            print("[EDGE2][KIS] WebSocket CONNECTED", flush=True)
             while not self._stop.is_set():
                 desired={str(x).strip().upper() for x in self.symbol_provider() if str(x).strip()}
-                for ticker in sorted(desired-subscribed): await self._subscribe_symbol(ws,key,ticker); subscribed.add(ticker); self.status["subscriptions"]=len(subscribed)
+                for ticker in sorted(desired-subscribed):
+                    await self._subscribe_symbol(ws,key,ticker)
+                    subscribed.add(ticker)
+                    self.status["subscriptions"]=len(subscribed)
+                    self.status["subscription_requests"]=int(self.status.get("subscription_requests",0) or 0)+2
+                    self.status["last_subscribed_ticker"]=ticker
+                    print(f"[EDGE2][KIS] subscribe requested ticker={ticker} tick+quote", flush=True)
                 try:data=await asyncio.wait_for(ws.recv(),timeout=2)
                 except asyncio.TimeoutError:continue
                 if not data:continue
@@ -104,8 +141,22 @@ class KISRealtimeBridge:
                 tr_id=str((obj.get("header") or {}).get("tr_id",""))
                 if tr_id=="PINGPONG":await ws.send(data);continue
                 body=obj.get("body") or {}
-                if str(body.get("rt_cd","0")) not in ("0",""):self.status["last_error"]=str(body.get("msg1","KIS subscription error"))[:300]
+                rt_cd=str(body.get("rt_cd","0"))
+                msg1=str(body.get("msg1",""))
+                if tr_id in (TR_TICK,TR_QUOTE):
+                    if rt_cd in ("0",""):
+                        self.status["subscription_acks"]=int(self.status.get("subscription_acks",0) or 0)+1
+                        self.status["last_subscription_ack"]=f"{tr_id}:OK"
+                        print(f"[EDGE2][KIS] subscription ACK tr_id={tr_id} OK", flush=True)
+                    else:
+                        safe_msg=msg1[:200]
+                        self.status["last_subscription_ack"]=f"{tr_id}:ERROR:{safe_msg}"
+                        self.status["last_error"]=f"subscription_error:{tr_id}:{safe_msg}"[:300]
+                        print(f"[EDGE2][KIS] subscription ACK tr_id={tr_id} ERROR {safe_msg}", flush=True)
+                elif rt_cd not in ("0",""):
+                    self.status["last_error"]=msg1[:300]
         self.status["connected"]=False
+        print("[EDGE2][KIS] WebSocket DISCONNECTED", flush=True)
     def _handle_ticks(self,payload,count):
         vals=payload.split("^"); width=len(TICK_FIELDS); usable=min(count,len(vals)//width)
         for i in range(usable):
