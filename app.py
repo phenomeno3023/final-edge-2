@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -628,14 +628,14 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 </style>
 </head>
 <body><div class="wrap">
-<div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.1.6</div>
+<div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.1.7</div>
 <div class="badges"><div class="badge">KIS 실시간 체결</div><div class="badge">KIS 실시간 호가</div><div class="badge">1분봉 메모리 생성</div><div class="badge">V반전 / 돌파 / 급락 탐지</div><div class="badge">자동주문 없음</div></div></div>
 <div class="grid">
 <div class="card"><h3>ENGINE</h3><div id="engine" class="mono">loading...</div></div>
 <div class="card"><h3>LIVE SIGNALS</h3><div id="signals" class="mono">loading...</div></div>
 </div>
 <div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>매도1</th><th>매수1</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="card" style="margin-top:14px"><div class="muted">V1.1.6은 KRX 신규상장 현황을 자동 조회해 당일 IPO·SPAC을 구분하고 KIS 실시간 구독 대상으로 자동 등록합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
+<div class="card" style="margin-top:14px"><div class="muted">V1.1.7은 KRX 신규상장 조회 파라미터를 실제 MDCSTAT20001 형식에 맞춰 수정했습니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
 </div>
 <script>
 function n(v,d=2){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:d})}
