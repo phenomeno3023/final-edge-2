@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -29,6 +29,9 @@ KIS_APP_SECRET = os.getenv("KIS_APP_SECRET", "").strip()
 KIS_ENABLED = os.getenv("KIS_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 KIS_WS_URL = os.getenv("KIS_WS_URL", "ws://ops.koreainvestment.com:21000").strip()
 KIS_APPROVAL_URL = os.getenv("KIS_APPROVAL_URL", "https://openapi.koreainvestment.com:9443/oauth2/Approval").strip()
+
+KRX_AUTO_TARGETS = os.getenv("EDGE2_KRX_AUTO_TARGETS", "1").strip().lower() not in {"0","false","no","off"}
+KRX_SYNC_INTERVAL_SEC = max(60, int(os.getenv("EDGE2_KRX_SYNC_INTERVAL_SEC", "300") or 300))
 
 # -----------------------------
 # In-memory real-time state
@@ -137,6 +140,17 @@ KIS_STATS = {
 KIS_BRIDGE = None
 KIS_BRIDGE_PID = 0
 KIS_BRIDGE_STARTED_AT = 0.0
+
+KRX_STATUS = {
+    "enabled": KRX_AUTO_TARGETS,
+    "last_sync_ts": 0.0,
+    "last_ok_ts": 0.0,
+    "last_error": "",
+    "fetched": 0,
+    "today_targets": 0,
+    "ipo_targets": 0,
+    "spac_targets": 0,
+}
 
 
 def now_kst() -> datetime:
@@ -330,6 +344,75 @@ def state_summary(s: InstrumentState) -> dict:
     }
 
 
+
+def _normalize_market_name(v: str) -> str:
+    x = (v or "").upper()
+    if "KOSDAQ" in x or "코스닥" in (v or ""):
+        return "KOSDAQ"
+    if "KOSPI" in x or "유가" in (v or "") or "코스피" in (v or ""):
+        return "KOSPI"
+    if "KONEX" in x or "코넥스" in (v or ""):
+        return "KONEX"
+    return (v or "")[:20]
+
+
+def _is_spac_name(name: str) -> bool:
+    u = (name or "").upper().replace(" ", "")
+    return ("스팩" in u) or ("SPAC" in u)
+
+
+def sync_krx_today_targets(force: bool = False) -> dict:
+    if not KRX_AUTO_TARGETS:
+        return {"ok": False, "status": "disabled"}
+
+    now = time.time()
+    if not force and now - float(KRX_STATUS.get("last_sync_ts", 0.0) or 0.0) < KRX_SYNC_INTERVAL_SEC:
+        return {"ok": True, "status": "cached", "krx": dict(KRX_STATUS)}
+
+    KRX_STATUS["last_sync_ts"] = now
+    try:
+        from krx_new_listings import fetch_new_listings
+        today = now_kst().strftime("%Y%m%d")
+        rows = fetch_new_listings(today, today)
+        KRX_STATUS["fetched"] = len(rows)
+
+        added = ipo = spac = 0
+        for row in rows:
+            ticker = str(row.get("ticker", "")).strip().upper()
+            name = str(row.get("name", "")).strip()
+            listing_date = str(row.get("listing_date", "")).replace("-", "").replace(".", "")
+            if not ticker or listing_date != today:
+                continue
+
+            category = "SPAC" if _is_spac_name(name) else "NEW_LISTING"
+            if category == "SPAC":
+                spac += 1
+            else:
+                ipo += 1
+
+            with STATE_LOCK:
+                if ticker not in WATCHLIST and len(WATCHLIST) >= MAX_WATCHLIST:
+                    continue
+                s = WATCHLIST.get(ticker) or InstrumentState(ticker=ticker)
+                s.name = name or s.name
+                s.market = _normalize_market_name(str(row.get("market", ""))) or s.market
+                s.category = category
+                s.enabled = True
+                WATCHLIST[ticker] = s
+                added += 1
+
+        KRX_STATUS["today_targets"] = ipo + spac
+        KRX_STATUS["ipo_targets"] = ipo
+        KRX_STATUS["spac_targets"] = spac
+        KRX_STATUS["last_ok_ts"] = time.time()
+        KRX_STATUS["last_error"] = ""
+        print(f"[EDGE2][KRX] sync OK fetched={len(rows)} today={ipo+spac} ipo={ipo} spac={spac} watch={len(WATCHLIST)}", flush=True)
+        return {"ok": True, "added_or_updated": added, "krx": dict(KRX_STATUS)}
+    except Exception as e:
+        KRX_STATUS["last_error"] = f"{type(e).__name__}:{e}"[:500]
+        print(f"[EDGE2][KRX] sync ERROR {type(e).__name__}: {e}", flush=True)
+        return {"ok": False, "error": KRX_STATUS["last_error"], "krx": dict(KRX_STATUS)}
+
 # -----------------------------
 # API
 # -----------------------------
@@ -402,7 +485,23 @@ def api_state():
                 "max_watchlist": MAX_WATCHLIST,
             },
             "kis": dict(KIS_STATS),
+            "krx": dict(KRX_STATUS),
         })
+
+
+@app.get("/api/krx/status")
+def api_krx_status():
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "krx": dict(KRX_STATUS),
+        "today": now_kst().strftime("%Y-%m-%d"),
+    })
+
+
+@app.post("/api/krx/sync")
+def api_krx_sync():
+    return jsonify(sync_krx_today_targets(force=True))
 
 
 @app.route("/api/watchlist", methods=["GET", "POST", "DELETE"])
@@ -529,20 +628,20 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 </style>
 </head>
 <body><div class="wrap">
-<div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.1.5</div>
+<div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.1.6</div>
 <div class="badges"><div class="badge">KIS 실시간 체결</div><div class="badge">KIS 실시간 호가</div><div class="badge">1분봉 메모리 생성</div><div class="badge">V반전 / 돌파 / 급락 탐지</div><div class="badge">자동주문 없음</div></div></div>
 <div class="grid">
 <div class="card"><h3>ENGINE</h3><div id="engine" class="mono">loading...</div></div>
 <div class="card"><h3>LIVE SIGNALS</h3><div id="signals" class="mono">loading...</div></div>
 </div>
 <div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>매도1</th><th>매수1</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="card" style="margin-top:14px"><div class="muted">V1.1.5는 승인키 로그를 완전 마스킹하고 WebSocket 연결·종목 구독 상태를 안전하게 추적합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
+<div class="card" style="margin-top:14px"><div class="muted">V1.1.6은 KRX 신규상장 현황을 자동 조회해 당일 IPO·SPAC을 구분하고 KIS 실시간 구독 대상으로 자동 등록합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
 </div>
 <script>
 function n(v,d=2){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:d})}
 async function refresh(){
  const r=await fetch('/api/state',{cache:'no-store'}); const d=await r.json();
- document.getElementById('engine').textContent=`VERSION ${d.version}\nWATCH ${d.watchlist.length}\nTICKS ${d.engine.ticks_received}\nSIGNALS ${d.engine.signals_emitted}\nKIS ${d.kis.connected?'CONNECTED':(d.kis.configured?'WAITING':'KEY NOT SET')}\nKIS SUBS ${d.kis.subscriptions||0}\nKIS TICK ${d.kis.tick_messages||0}\nKIS QUOTE ${d.kis.quote_messages||0}\nORDERS ${d.orders_enabled?'ON':'OFF'}`;
+ document.getElementById('engine').textContent=`VERSION ${d.version}\nWATCH ${d.watchlist.length}\nTICKS ${d.engine.ticks_received}\nSIGNALS ${d.engine.signals_emitted}\nKIS ${d.kis.connected?'CONNECTED':(d.kis.configured?'WAITING':'KEY NOT SET')}\nKIS SUBS ${d.kis.subscriptions||0}\nKIS TICK ${d.kis.tick_messages||0}\nKIS QUOTE ${d.kis.quote_messages||0}\nKRX AUTO ${d.krx&&d.krx.enabled?'ON':'OFF'}\nTODAY ${d.krx?d.krx.today_targets||0:0} · IPO ${d.krx?d.krx.ipo_targets||0:0} · SPAC ${d.krx?d.krx.spac_targets||0:0}\nORDERS ${d.orders_enabled?'ON':'OFF'}`;
  document.getElementById('signals').innerHTML=(d.signals.slice(0,8).map(s=>`${s.ticker} · ${s.kind} · ${s.strength}\n${s.reason}`).join('\n\n')||'<span class="muted">신호 대기</span>');
  document.getElementById('rows').innerHTML=d.watchlist.map(x=>`<tr><td>${x.name||x.ticker}<br><span class="muted">${x.ticker}</span></td><td>${x.category}</td><td>${n(x.last_price,0)}</td><td>${n(x.ask1,0)}</td><td>${n(x.bid1,0)}</td><td>${n(x.change_pct)}%</td><td>${n(x.from_low_pct)}%</td><td>${n(x.from_high_pct)}%</td><td>${n(x.tick_count,0)}</td><td>${x.last_signal||'-'}</td></tr>`).join('');
 }
@@ -682,7 +781,8 @@ def ensure_kis_bridge() -> None:
 
 
 @app.before_request
-def _ensure_kis_for_request():
+def _ensure_runtime_for_request():
+    sync_krx_today_targets(force=False)
     ensure_kis_bridge()
 
 
