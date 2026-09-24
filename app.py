@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -358,6 +358,8 @@ def api_kis_status():
         "quote_messages": int(KIS_STATS.get("quote_messages", 0) or 0),
         "last_message_ts": float(KIS_STATS.get("last_message_ts", 0.0) or 0.0),
         "last_error": str(KIS_STATS.get("last_error", "")),
+        "approval_url": KIS_APPROVAL_URL,
+        "ws_url": KIS_WS_URL,
         "bridge_thread_alive": bool(
             KIS_BRIDGE
             and getattr(KIS_BRIDGE, "_thread", None)
@@ -518,7 +520,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <div class="card"><h3>LIVE SIGNALS</h3><div id="signals" class="mono">loading...</div></div>
 </div>
 <div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>매도1</th><th>매수1</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="card" style="margin-top:14px"><div class="muted">V1.1.2는 감시종목이 없어도 KIS 승인키·WebSocket 연결을 먼저 확인하고, 종목 등록 시 실시간 구독합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
+<div class="card" style="margin-top:14px"><div class="muted">V1.1.3은 KIS 승인키 요청의 HTTP 상태·응답·예외를 진단해 연결 실패 원인을 표시합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
 </div>
 <script>
 function n(v,d=2){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:d})}

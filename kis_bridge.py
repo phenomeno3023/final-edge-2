@@ -24,9 +24,56 @@ class KISRealtimeBridge:
             except Exception as e: self.status["connected"]=False; self.status["last_error"]=f"{type(e).__name__}: {e}"[:300]
             if not self._stop.is_set(): time.sleep(5)
     def _approval_key(self):
-        r=requests.post(self.approval_url,headers={"content-type":"application/json"},data=json.dumps({"grant_type":"client_credentials","appkey":self.app_key,"secretkey":self.app_secret}),timeout=10); r.raise_for_status(); data=r.json(); key=str(data.get("approval_key","")).strip()
-        if not key: raise RuntimeError(f"approval_key missing: {data}")
-        self.status["approval_ready"]=True; return key
+        print("[EDGE2][KIS] requesting WebSocket approval key", flush=True)
+        payload = {
+            "grant_type": "client_credentials",
+            "appkey": self.app_key,
+            "secretkey": self.app_secret,
+        }
+        try:
+            r = requests.post(
+                self.approval_url,
+                headers={"content-type": "application/json"},
+                data=json.dumps(payload),
+                timeout=10,
+            )
+        except Exception as e:
+            msg = f"approval_request_exception:{type(e).__name__}:{e}"
+            self.status["approval_ready"] = False
+            self.status["last_error"] = msg[:500]
+            print(f"[EDGE2][KIS] {msg}", flush=True)
+            raise
+
+        body_preview = (r.text or "").strip().replace("\n", " ")[:500]
+        print(f"[EDGE2][KIS] approval HTTP {r.status_code} body={body_preview}", flush=True)
+
+        if not r.ok:
+            msg = f"approval_http_error:{r.status_code}:{body_preview}"
+            self.status["approval_ready"] = False
+            self.status["last_error"] = msg[:500]
+            raise RuntimeError(msg)
+
+        try:
+            data = r.json()
+        except Exception as e:
+            msg = f"approval_json_error:{type(e).__name__}:{body_preview}"
+            self.status["approval_ready"] = False
+            self.status["last_error"] = msg[:500]
+            raise RuntimeError(msg)
+
+        key = str(data.get("approval_key", "")).strip()
+        if not key:
+            safe_data = dict(data) if isinstance(data, dict) else {"response": str(data)}
+            safe_data.pop("approval_key", None)
+            msg = f"approval_key_missing:{safe_data}"
+            self.status["approval_ready"] = False
+            self.status["last_error"] = msg[:500]
+            raise RuntimeError(msg)
+
+        self.status["approval_ready"] = True
+        self.status["last_error"] = ""
+        print("[EDGE2][KIS] approval key READY", flush=True)
+        return key
     @staticmethod
     def _sub_msg(key,tr_id,ticker):
         return json.dumps({"header":{"approval_key":key,"custtype":"P","tr_type":"1","content-type":"utf-8"},"body":{"input":{"tr_id":tr_id,"tr_key":ticker}}},ensure_ascii=False)
