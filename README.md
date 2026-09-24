@@ -1,16 +1,14 @@
-# FINAL EDGE 2 V1.1.1 — KIS Connection Diagnostics
+# FINAL EDGE 2 V1.1.2 — KIS Empty-Watchlist Connection Fix
 
-V1.1.0 기능은 유지하고 KIS 연결 진단을 강화한 버전입니다.
+- WATCHLIST가 0개여도 KIS bridge worker 시작
+- WebSocket approval key 먼저 발급
+- KIS WebSocket 연결 먼저 성립
+- 감시종목 추가 시 체결/호가 구독
+- 자동주문 계속 비활성화
+- App Key/App Secret은 Render 환경변수에서만 읽고 로그/API에 출력하지 않음
 
-추가:
-- Render 로그에 KIS bridge 시작 여부 출력
-- WebSocket approval key 요청/HTTP 상태/성공 여부 출력
-- WebSocket 접속 성공/오류/5초 재시도 출력
-- `/api/kis/status` 진단 endpoint 추가
-- App Key / App Secret 값 자체는 로그/API에 절대 출력하지 않음
-- 주문 기능 없음 (`ORDERS_ENABLED = False`)
-
-배포 후 확인:
-1. Render Logs에서 `[EDGE2][KIS]` 검색
-2. 브라우저에서 `/api/kis/status` 확인
-3. `last_error`가 있으면 그 오류만 기준으로 다음 수정 진행
+배포 후 기대 상태:
+- configured=true
+- approval_ready=true
+- connected=true
+- watchlist가 비어 있으면 subscriptions/tick/quote가 0인 것은 정상
