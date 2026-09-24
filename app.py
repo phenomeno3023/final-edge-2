@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -130,6 +130,8 @@ KIS_STATS = {
     "last_error": "",
 }
 KIS_BRIDGE = None
+KIS_BRIDGE_PID = 0
+KIS_BRIDGE_STARTED_AT = 0.0
 
 
 def now_kst() -> datetime:
@@ -360,8 +362,12 @@ def api_kis_status():
         "last_error": str(KIS_STATS.get("last_error", "")),
         "approval_url": KIS_APPROVAL_URL,
         "ws_url": KIS_WS_URL,
+        "process_pid": os.getpid(),
+        "bridge_pid": KIS_BRIDGE_PID,
+        "bridge_started_at": KIS_BRIDGE_STARTED_AT,
         "bridge_thread_alive": bool(
             KIS_BRIDGE
+            and KIS_BRIDGE_PID == os.getpid()
             and getattr(KIS_BRIDGE, "_thread", None)
             and KIS_BRIDGE._thread.is_alive()
         ),
@@ -520,7 +526,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 <div class="card"><h3>LIVE SIGNALS</h3><div id="signals" class="mono">loading...</div></div>
 </div>
 <div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>매도1</th><th>매수1</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="card" style="margin-top:14px"><div class="muted">V1.1.3은 KIS 승인키 요청의 HTTP 상태·응답·예외를 진단해 연결 실패 원인을 표시합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
+<div class="card" style="margin-top:14px"><div class="muted">V1.1.4는 Render/Gunicorn의 실제 웹 워커에서 KIS bridge를 시작·복구하도록 수정했습니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
 </div>
 <script>
 function n(v,d=2){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:d})}
@@ -590,33 +596,87 @@ def _kis_on_quote(row: dict) -> None:
         KIS_STATS["last_error"] = f"quote:{e}"[:300]
 
 
-def start_kis_bridge() -> None:
-    global KIS_BRIDGE
-    print(
-        f"[EDGE2][KIS] startup enabled={KIS_ENABLED} configured={bool(KIS_APP_KEY and KIS_APP_SECRET)} "
-        f"watchlist={len(WATCHLIST)}",
-        flush=True,
-    )
+def ensure_kis_bridge() -> None:
+    """Start/restart the KIS bridge inside the active web worker process.
+
+    Render/Gunicorn can import the module in a short-lived process before the
+    serving worker is ready. A thread created there disappears with that
+    process. Therefore the bridge is ensured lazily from the actual request
+    worker and is restarted if the PID changed or the thread died.
+    """
+    global KIS_BRIDGE, KIS_BRIDGE_PID, KIS_BRIDGE_STARTED_AT
+
+    pid = os.getpid()
+    KIS_STATS["process_pid"] = pid
+
     if not KIS_ENABLED:
         KIS_STATS["last_error"] = "KIS_DISABLED"
-        print("[EDGE2][KIS] bridge disabled by KIS_ENABLED", flush=True)
         return
+
     if not (KIS_APP_KEY and KIS_APP_SECRET):
         KIS_STATS["last_error"] = "KIS_KEY_NOT_SET"
-        print("[EDGE2][KIS] App Key/Secret environment variables are not configured", flush=True)
         return
+
+    thread = getattr(KIS_BRIDGE, "_thread", None) if KIS_BRIDGE else None
+    alive = bool(thread and thread.is_alive())
+    same_process = KIS_BRIDGE_PID == pid
+
+    if KIS_BRIDGE is not None and same_process and alive:
+        return
+
+    reason = "first_start"
+    if KIS_BRIDGE is not None and not same_process:
+        reason = f"pid_changed:{KIS_BRIDGE_PID}->{pid}"
+    elif KIS_BRIDGE is not None and not alive:
+        reason = "thread_not_alive"
+
+    print(
+        f"[EDGE2][KIS] ensure bridge pid={pid} reason={reason} "
+        f"configured={bool(KIS_APP_KEY and KIS_APP_SECRET)} watchlist={len(WATCHLIST)}",
+        flush=True,
+    )
+
     try:
         from kis_bridge import KISRealtimeBridge
-        KIS_BRIDGE = KISRealtimeBridge(app_key=KIS_APP_KEY, app_secret=KIS_APP_SECRET, symbol_provider=_kis_symbols, on_tick=_kis_on_tick, on_quote=_kis_on_quote, status=KIS_STATS, ws_url=KIS_WS_URL, approval_url=KIS_APPROVAL_URL)
+
+        KIS_STATS["connected"] = False
+        KIS_STATS["approval_ready"] = False
+        KIS_STATS["last_error"] = ""
+
+        KIS_BRIDGE = KISRealtimeBridge(
+            app_key=KIS_APP_KEY,
+            app_secret=KIS_APP_SECRET,
+            symbol_provider=_kis_symbols,
+            on_tick=_kis_on_tick,
+            on_quote=_kis_on_quote,
+            status=KIS_STATS,
+            ws_url=KIS_WS_URL,
+            approval_url=KIS_APPROVAL_URL,
+        )
+        KIS_BRIDGE_PID = pid
+        KIS_BRIDGE_STARTED_AT = time.time()
+        KIS_STATS["bridge_started_at"] = KIS_BRIDGE_STARTED_AT
         KIS_BRIDGE.start()
-        print("[EDGE2][KIS] bridge thread started", flush=True)
+
+        thread = getattr(KIS_BRIDGE, "_thread", None)
+        KIS_STATS["bridge_thread_alive"] = bool(thread and thread.is_alive())
+        print(
+            f"[EDGE2][KIS] bridge start requested pid={pid} "
+            f"thread_alive={KIS_STATS['bridge_thread_alive']}",
+            flush=True,
+        )
     except Exception as e:
-        KIS_STATS["last_error"] = f"startup:{type(e).__name__}:{e}"[:300]
+        KIS_STATS["last_error"] = f"startup:{type(e).__name__}:{e}"[:500]
+        KIS_STATS["bridge_thread_alive"] = False
         print(f"[EDGE2][KIS] startup ERROR {type(e).__name__}: {e}", flush=True)
 
 
+@app.before_request
+def _ensure_kis_for_request():
+    ensure_kis_bridge()
+
+
 bootstrap_watchlist()
-start_kis_bridge()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))
