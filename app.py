@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -24,6 +24,11 @@ app = Flask(__name__)
 INGEST_TOKEN = os.getenv("EDGE2_INGEST_TOKEN", "").strip()
 MAX_WATCHLIST = max(1, int(os.getenv("EDGE2_MAX_WATCHLIST", "40") or 40))
 EVENT_RETENTION = max(200, int(os.getenv("EDGE2_EVENT_RETENTION", "5000") or 5000))
+KIS_APP_KEY = os.getenv("KIS_APP_KEY", "").strip()
+KIS_APP_SECRET = os.getenv("KIS_APP_SECRET", "").strip()
+KIS_ENABLED = os.getenv("KIS_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+KIS_WS_URL = os.getenv("KIS_WS_URL", "ws://ops.koreainvestment.com:21000").strip()
+KIS_APPROVAL_URL = os.getenv("KIS_APPROVAL_URL", "https://openapi.koreainvestment.com:9443/oauth2/Approval").strip()
 
 # -----------------------------
 # In-memory real-time state
@@ -54,6 +59,19 @@ class MinuteBar:
 
 
 @dataclass
+class Quote:
+    ticker: str
+    ts: float
+    ask1: float = 0.0
+    bid1: float = 0.0
+    ask_qty1: float = 0.0
+    bid_qty1: float = 0.0
+    total_ask_qty: float = 0.0
+    total_bid_qty: float = 0.0
+    source: str = "kis"
+
+
+@dataclass
 class Signal:
     ticker: str
     kind: str
@@ -72,6 +90,13 @@ class InstrumentState:
     enabled: bool = True
     last_price: float = 0.0
     last_ts: float = 0.0
+    ask1: float = 0.0
+    bid1: float = 0.0
+    ask_qty1: float = 0.0
+    bid_qty1: float = 0.0
+    total_ask_qty: float = 0.0
+    total_bid_qty: float = 0.0
+    quote_ts: float = 0.0
     session_open: float = 0.0
     session_high: float = 0.0
     session_low: float = 0.0
@@ -92,6 +117,19 @@ ENGINE_STATS = {
     "signals_emitted": 0,
     "last_event_ts": 0.0,
 }
+
+KIS_STATS = {
+    "configured": bool(KIS_APP_KEY and KIS_APP_SECRET),
+    "enabled": KIS_ENABLED,
+    "connected": False,
+    "approval_ready": False,
+    "subscriptions": 0,
+    "tick_messages": 0,
+    "quote_messages": 0,
+    "last_message_ts": 0.0,
+    "last_error": "",
+}
+KIS_BRIDGE = None
 
 
 def now_kst() -> datetime:
@@ -236,6 +274,21 @@ def process_tick(tick: Tick) -> Tuple[bool, str]:
         return True, "ok"
 
 
+def process_quote(q: Quote) -> Tuple[bool, str]:
+    with STATE_LOCK:
+        s = WATCHLIST.get(q.ticker)
+        if not s or not s.enabled:
+            return False, "ticker_not_watched"
+        s.ask1 = q.ask1
+        s.bid1 = q.bid1
+        s.ask_qty1 = q.ask_qty1
+        s.bid_qty1 = q.bid_qty1
+        s.total_ask_qty = q.total_ask_qty
+        s.total_bid_qty = q.total_bid_qty
+        s.quote_ts = q.ts
+        return True, "ok"
+
+
 def state_summary(s: InstrumentState) -> dict:
     chg = ((s.last_price / s.session_open) - 1.0) * 100 if s.session_open else 0.0
     from_low = ((s.last_price / s.session_low) - 1.0) * 100 if s.session_low else 0.0
@@ -260,6 +313,13 @@ def state_summary(s: InstrumentState) -> dict:
         "last_signal": s.last_signal,
         "last_signal_ts": s.last_signal_ts,
         "last_ts": s.last_ts,
+        "ask1": s.ask1,
+        "bid1": s.bid1,
+        "ask_qty1": s.ask_qty1,
+        "bid_qty1": s.bid_qty1,
+        "total_ask_qty": s.total_ask_qty,
+        "total_bid_qty": s.total_bid_qty,
+        "quote_ts": s.quote_ts,
     }
 
 
@@ -275,6 +335,12 @@ def health():
         "orders_enabled": ORDERS_ENABLED,
         "uptime_sec": round(time.time() - STARTED_AT, 1),
         "watchlist_count": len(WATCHLIST),
+        "kis": {
+            "configured": KIS_STATS["configured"],
+            "enabled": KIS_STATS["enabled"],
+            "connected": KIS_STATS["connected"],
+            "approval_ready": KIS_STATS["approval_ready"],
+        },
     })
 
 
@@ -295,6 +361,7 @@ def api_state():
                 "mode": "provider-neutral ingest bridge",
                 "max_watchlist": MAX_WATCHLIST,
             },
+            "kis": dict(KIS_STATS),
         })
 
 
@@ -423,21 +490,21 @@ table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px;borde
 </head>
 <body><div class="wrap">
 <div class="hero"><h1>FINAL EDGE 2</h1><div class="sub">신규상장 · SPAC 실시간 분석 엔진 V1.0</div>
-<div class="badges"><div class="badge">실시간 이벤트 처리</div><div class="badge">1분봉 메모리 생성</div><div class="badge">V반전 / 돌파 / 급락 탐지</div><div class="badge">자동주문 없음</div></div></div>
+<div class="badges"><div class="badge">KIS 실시간 체결</div><div class="badge">KIS 실시간 호가</div><div class="badge">1분봉 메모리 생성</div><div class="badge">V반전 / 돌파 / 급락 탐지</div><div class="badge">자동주문 없음</div></div></div>
 <div class="grid">
 <div class="card"><h3>ENGINE</h3><div id="engine" class="mono">loading...</div></div>
 <div class="card"><h3>LIVE SIGNALS</h3><div id="signals" class="mono">loading...</div></div>
 </div>
-<div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
-<div class="card" style="margin-top:14px"><div class="muted">V1.0은 provider-neutral bridge 구조입니다. 실제 증권사 WebSocket 연결은 별도 bridge 모듈로 붙이며, 이 화면/엔진에는 주문 기능이 없습니다.</div></div>
+<div class="card" style="margin-top:14px"><h3>WATCHLIST</h3><table><thead><tr><th>종목</th><th>구분</th><th>현재가</th><th>매도1</th><th>매수1</th><th>등락</th><th>저점대비</th><th>고점대비</th><th>체결</th><th>최근신호</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="card" style="margin-top:14px"><div class="muted">V1.1은 KIS WebSocket 실시간 체결·호가 bridge를 내장합니다. App Key/Secret은 환경변수에서만 읽으며, 주문 기능은 비활성화되어 있습니다.</div></div>
 </div>
 <script>
 function n(v,d=2){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:d})}
 async function refresh(){
  const r=await fetch('/api/state',{cache:'no-store'}); const d=await r.json();
- document.getElementById('engine').textContent=`VERSION ${d.version}\nWATCH ${d.watchlist.length}\nTICKS ${d.engine.ticks_received}\nSIGNALS ${d.engine.signals_emitted}\nBRIDGE ${d.bridge.configured?'READY':'TOKEN NOT SET'}\nORDERS ${d.orders_enabled?'ON':'OFF'}`;
+ document.getElementById('engine').textContent=`VERSION ${d.version}\nWATCH ${d.watchlist.length}\nTICKS ${d.engine.ticks_received}\nSIGNALS ${d.engine.signals_emitted}\nKIS ${d.kis.connected?'CONNECTED':(d.kis.configured?'WAITING':'KEY NOT SET')}\nKIS SUBS ${d.kis.subscriptions||0}\nKIS TICK ${d.kis.tick_messages||0}\nKIS QUOTE ${d.kis.quote_messages||0}\nORDERS ${d.orders_enabled?'ON':'OFF'}`;
  document.getElementById('signals').innerHTML=(d.signals.slice(0,8).map(s=>`${s.ticker} · ${s.kind} · ${s.strength}\n${s.reason}`).join('\n\n')||'<span class="muted">신호 대기</span>');
- document.getElementById('rows').innerHTML=d.watchlist.map(x=>`<tr><td>${x.name||x.ticker}<br><span class="muted">${x.ticker}</span></td><td>${x.category}</td><td>${n(x.last_price,0)}</td><td>${n(x.change_pct)}%</td><td>${n(x.from_low_pct)}%</td><td>${n(x.from_high_pct)}%</td><td>${n(x.tick_count,0)}</td><td>${x.last_signal||'-'}</td></tr>`).join('');
+ document.getElementById('rows').innerHTML=d.watchlist.map(x=>`<tr><td>${x.name||x.ticker}<br><span class="muted">${x.ticker}</span></td><td>${x.category}</td><td>${n(x.last_price,0)}</td><td>${n(x.ask1,0)}</td><td>${n(x.bid1,0)}</td><td>${n(x.change_pct)}%</td><td>${n(x.from_low_pct)}%</td><td>${n(x.from_high_pct)}%</td><td>${n(x.tick_count,0)}</td><td>${x.last_signal||'-'}</td></tr>`).join('');
 }
 refresh();setInterval(refresh,1000);
 </script></body></html>
@@ -471,7 +538,48 @@ def bootstrap_watchlist() -> None:
             )
 
 
+
+def _kis_symbols() -> List[str]:
+    with STATE_LOCK:
+        return [s.ticker for s in WATCHLIST.values() if s.enabled]
+
+
+def _kis_on_tick(row: dict) -> None:
+    try:
+        tick = Tick(ticker=str(row["ticker"]).strip().upper(), price=float(row["price"]), volume=float(row.get("volume", 0)), ts=float(row.get("ts", time.time())), side=str(row.get("side", ""))[:12], source="kis")
+        ok, _ = process_tick(tick)
+        if ok:
+            KIS_STATS["tick_messages"] += 1
+            KIS_STATS["last_message_ts"] = tick.ts
+    except Exception as e:
+        KIS_STATS["last_error"] = f"tick:{e}"[:300]
+
+
+def _kis_on_quote(row: dict) -> None:
+    try:
+        q = Quote(ticker=str(row["ticker"]).strip().upper(), ts=float(row.get("ts", time.time())), ask1=float(row.get("ask1",0) or 0), bid1=float(row.get("bid1",0) or 0), ask_qty1=float(row.get("ask_qty1",0) or 0), bid_qty1=float(row.get("bid_qty1",0) or 0), total_ask_qty=float(row.get("total_ask_qty",0) or 0), total_bid_qty=float(row.get("total_bid_qty",0) or 0), source="kis")
+        ok, _ = process_quote(q)
+        if ok:
+            KIS_STATS["quote_messages"] += 1
+            KIS_STATS["last_message_ts"] = q.ts
+    except Exception as e:
+        KIS_STATS["last_error"] = f"quote:{e}"[:300]
+
+
+def start_kis_bridge() -> None:
+    global KIS_BRIDGE
+    if not KIS_ENABLED or not (KIS_APP_KEY and KIS_APP_SECRET):
+        return
+    try:
+        from kis_bridge import KISRealtimeBridge
+        KIS_BRIDGE = KISRealtimeBridge(app_key=KIS_APP_KEY, app_secret=KIS_APP_SECRET, symbol_provider=_kis_symbols, on_tick=_kis_on_tick, on_quote=_kis_on_quote, status=KIS_STATS, ws_url=KIS_WS_URL, approval_url=KIS_APPROVAL_URL)
+        KIS_BRIDGE.start()
+    except Exception as e:
+        KIS_STATS["last_error"] = f"startup:{e}"[:300]
+
+
 bootstrap_watchlist()
+start_kis_bridge()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "10000"))

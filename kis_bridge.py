@@ -1,0 +1,71 @@
+from __future__ import annotations
+import asyncio, json, threading, time
+from typing import Callable, Dict, Iterable, Optional
+import requests, websockets
+TR_TICK="H0STCNT0"
+TR_QUOTE="H0STASP0"
+TICK_FIELDS=["MKSC_SHRN_ISCD","STCK_CNTG_HOUR","STCK_PRPR","PRDY_VRSS_SIGN","PRDY_VRSS","PRDY_CTRT","WGHN_AVRG_STCK_PRC","STCK_OPRC","STCK_HGPR","STCK_LWPR","ASKP1","BIDP1","CNTG_VOL","ACML_VOL","ACML_TR_PBMN","SELN_CNTG_CSNU","SHNU_CNTG_CSNU","NTBY_CNTG_CSNU","CTTR","SELN_CNTG_SMTN","SHNU_CNTG_SMTN","CCLD_DVSN","SHNU_RATE","PRDY_VOL_VRSS_ACML_VOL_RATE","OPRC_HOUR","OPRC_VRSS_PRPR_SIGN","OPRC_VRSS_PRPR","HGPR_HOUR","HGPR_VRSS_PRPR_SIGN","HGPR_VRSS_PRPR","LWPR_HOUR","LWPR_VRSS_PRPR_SIGN","LWPR_VRSS_PRPR","BSOP_DATE","NEW_MKOP_CLS_CODE","TRHT_YN","ASKP_RSQN1","BIDP_RSQN1","TOTAL_ASKP_RSQN","TOTAL_BIDP_RSQN","VOL_TNRT","PRDY_SMNS_HOUR_ACML_VOL","PRDY_SMNS_HOUR_ACML_VOL_RATE","HOUR_CLS_CODE","MRKT_TRTM_CLS_CODE","VI_STND_PRC"]
+QUOTE_FIELDS=["MKSC_SHRN_ISCD","BSOP_HOUR","HOUR_CLS_CODE","ASKP1","ASKP2","ASKP3","ASKP4","ASKP5","ASKP6","ASKP7","ASKP8","ASKP9","ASKP10","BIDP1","BIDP2","BIDP3","BIDP4","BIDP5","BIDP6","BIDP7","BIDP8","BIDP9","BIDP10","ASKP_RSQN1","ASKP_RSQN2","ASKP_RSQN3","ASKP_RSQN4","ASKP_RSQN5","ASKP_RSQN6","ASKP_RSQN7","ASKP_RSQN8","ASKP_RSQN9","ASKP_RSQN10","BIDP_RSQN1","BIDP_RSQN2","BIDP_RSQN3","BIDP_RSQN4","BIDP_RSQN5","BIDP_RSQN6","BIDP_RSQN7","BIDP_RSQN8","BIDP_RSQN9","BIDP_RSQN10","TOTAL_ASKP_RSQN","TOTAL_BIDP_RSQN","OVTM_TOTAL_ASKP_RSQN","OVTM_TOTAL_BIDP_RSQN","ANTC_CNPR","ANTC_CNQN","ANTC_VOL","ANTC_CNTG_VRSS","ANTC_CNTG_VRSS_SIGN","ANTC_CNTG_PRDY_CTRT","ACML_VOL","TOTAL_ASKP_RSQN_ICDC","TOTAL_BIDP_RSQN_ICDC","OVTM_TOTAL_ASKP_ICDC","OVTM_TOTAL_BIDP_ICDC","STCK_DEAL_CLS_CODE"]
+
+def _num(v,d=0.0):
+    try:return float(str(v).replace(",","").strip())
+    except:return d
+
+class KISRealtimeBridge:
+    def __init__(self,app_key,app_secret,symbol_provider,on_tick,on_quote,status,ws_url="ws://ops.koreainvestment.com:21000",approval_url="https://openapi.koreainvestment.com:9443/oauth2/Approval"):
+        self.app_key=app_key; self.app_secret=app_secret; self.symbol_provider=symbol_provider; self.on_tick=on_tick; self.on_quote=on_quote; self.status=status; self.ws_url=ws_url; self.approval_url=approval_url; self._stop=threading.Event(); self._thread=None
+    def start(self):
+        if self._thread and self._thread.is_alive(): return
+        self._thread=threading.Thread(target=self._thread_main,name="kis-ws",daemon=True); self._thread.start()
+    def stop(self): self._stop.set()
+    def _thread_main(self):
+        while not self._stop.is_set():
+            try: asyncio.run(self._run_once())
+            except Exception as e: self.status["connected"]=False; self.status["last_error"]=f"{type(e).__name__}: {e}"[:300]
+            if not self._stop.is_set(): time.sleep(5)
+    def _approval_key(self):
+        r=requests.post(self.approval_url,headers={"content-type":"application/json"},data=json.dumps({"grant_type":"client_credentials","appkey":self.app_key,"secretkey":self.app_secret}),timeout=10); r.raise_for_status(); data=r.json(); key=str(data.get("approval_key","")).strip()
+        if not key: raise RuntimeError(f"approval_key missing: {data}")
+        self.status["approval_ready"]=True; return key
+    @staticmethod
+    def _sub_msg(key,tr_id,ticker):
+        return json.dumps({"header":{"approval_key":key,"custtype":"P","tr_type":"1","content-type":"utf-8"},"body":{"input":{"tr_id":tr_id,"tr_key":ticker}}},ensure_ascii=False)
+    async def _subscribe_symbol(self,ws,key,ticker):
+        await ws.send(self._sub_msg(key,TR_TICK,ticker)); await asyncio.sleep(.08); await ws.send(self._sub_msg(key,TR_QUOTE,ticker)); await asyncio.sleep(.08)
+    async def _run_once(self):
+        self.status["approval_ready"]=False; key=await asyncio.to_thread(self._approval_key); subscribed=set()
+        async with websockets.connect(self.ws_url,ping_interval=None,close_timeout=5,open_timeout=10) as ws:
+            self.status["connected"]=True; self.status["last_error"]=""
+            while not self._stop.is_set():
+                desired={str(x).strip().upper() for x in self.symbol_provider() if str(x).strip()}
+                for ticker in sorted(desired-subscribed): await self._subscribe_symbol(ws,key,ticker); subscribed.add(ticker); self.status["subscriptions"]=len(subscribed)
+                try:data=await asyncio.wait_for(ws.recv(),timeout=2)
+                except asyncio.TimeoutError:continue
+                if not data:continue
+                self.status["last_message_ts"]=time.time()
+                if data[0] in ("0","1") and "|" in data:
+                    parts=data.split("|",3)
+                    if len(parts)<4:continue
+                    tr_id=parts[1]
+                    try:count=max(1,int(parts[2] or "1"))
+                    except:count=1
+                    if tr_id==TR_TICK:self._handle_ticks(parts[3],count)
+                    elif tr_id==TR_QUOTE:self._handle_quotes(parts[3],count)
+                    continue
+                try:obj=json.loads(data)
+                except:continue
+                tr_id=str((obj.get("header") or {}).get("tr_id",""))
+                if tr_id=="PINGPONG":await ws.send(data);continue
+                body=obj.get("body") or {}
+                if str(body.get("rt_cd","0")) not in ("0",""):self.status["last_error"]=str(body.get("msg1","KIS subscription error"))[:300]
+        self.status["connected"]=False
+    def _handle_ticks(self,payload,count):
+        vals=payload.split("^"); width=len(TICK_FIELDS); usable=min(count,len(vals)//width)
+        for i in range(usable):
+            row=dict(zip(TICK_FIELDS,vals[i*width:(i+1)*width])); ticker=row.get("MKSC_SHRN_ISCD","").strip(); price=_num(row.get("STCK_PRPR")); volume=abs(_num(row.get("CNTG_VOL")))
+            if ticker and price>0:self.on_tick({"ticker":ticker,"price":price,"volume":volume,"ts":time.time(),"side":row.get("CCLD_DVSN","")})
+    def _handle_quotes(self,payload,count):
+        vals=payload.split("^"); width=len(QUOTE_FIELDS); usable=min(count,len(vals)//width)
+        for i in range(usable):
+            row=dict(zip(QUOTE_FIELDS,vals[i*width:(i+1)*width])); ticker=row.get("MKSC_SHRN_ISCD","").strip()
+            if ticker:self.on_quote({"ticker":ticker,"ts":time.time(),"ask1":_num(row.get("ASKP1")),"bid1":_num(row.get("BIDP1")),"ask_qty1":_num(row.get("ASKP_RSQN1")),"bid_qty1":_num(row.get("BIDP_RSQN1")),"total_ask_qty":_num(row.get("TOTAL_ASKP_RSQN")),"total_bid_qty":_num(row.get("TOTAL_BIDP_RSQN"))})
