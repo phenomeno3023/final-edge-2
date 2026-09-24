@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: final-edge-2
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:$PORT app:app
+    healthCheckPath: /health
