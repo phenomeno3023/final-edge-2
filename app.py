@@ -12,7 +12,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, request, render_template_string
 
 KST = timezone(timedelta(hours=9))
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_NAME = "FINAL EDGE 2"
 ORDERS_ENABLED = False
 
@@ -344,6 +344,28 @@ def health():
     })
 
 
+@app.get("/api/kis/status")
+def api_kis_status():
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "configured": bool(KIS_APP_KEY and KIS_APP_SECRET),
+        "enabled": KIS_ENABLED,
+        "connected": bool(KIS_STATS.get("connected")),
+        "approval_ready": bool(KIS_STATS.get("approval_ready")),
+        "subscriptions": int(KIS_STATS.get("subscriptions", 0) or 0),
+        "tick_messages": int(KIS_STATS.get("tick_messages", 0) or 0),
+        "quote_messages": int(KIS_STATS.get("quote_messages", 0) or 0),
+        "last_message_ts": float(KIS_STATS.get("last_message_ts", 0.0) or 0.0),
+        "last_error": str(KIS_STATS.get("last_error", "")),
+        "bridge_thread_alive": bool(
+            KIS_BRIDGE
+            and getattr(KIS_BRIDGE, "_thread", None)
+            and KIS_BRIDGE._thread.is_alive()
+        ),
+    })
+
+
 @app.get("/api/state")
 def api_state():
     with STATE_LOCK:
@@ -568,14 +590,27 @@ def _kis_on_quote(row: dict) -> None:
 
 def start_kis_bridge() -> None:
     global KIS_BRIDGE
-    if not KIS_ENABLED or not (KIS_APP_KEY and KIS_APP_SECRET):
+    print(
+        f"[EDGE2][KIS] startup enabled={KIS_ENABLED} configured={bool(KIS_APP_KEY and KIS_APP_SECRET)} "
+        f"watchlist={len(WATCHLIST)}",
+        flush=True,
+    )
+    if not KIS_ENABLED:
+        KIS_STATS["last_error"] = "KIS_DISABLED"
+        print("[EDGE2][KIS] bridge disabled by KIS_ENABLED", flush=True)
+        return
+    if not (KIS_APP_KEY and KIS_APP_SECRET):
+        KIS_STATS["last_error"] = "KIS_KEY_NOT_SET"
+        print("[EDGE2][KIS] App Key/Secret environment variables are not configured", flush=True)
         return
     try:
         from kis_bridge import KISRealtimeBridge
         KIS_BRIDGE = KISRealtimeBridge(app_key=KIS_APP_KEY, app_secret=KIS_APP_SECRET, symbol_provider=_kis_symbols, on_tick=_kis_on_tick, on_quote=_kis_on_quote, status=KIS_STATS, ws_url=KIS_WS_URL, approval_url=KIS_APPROVAL_URL)
         KIS_BRIDGE.start()
+        print("[EDGE2][KIS] bridge thread started", flush=True)
     except Exception as e:
-        KIS_STATS["last_error"] = f"startup:{e}"[:300]
+        KIS_STATS["last_error"] = f"startup:{type(e).__name__}:{e}"[:300]
+        print(f"[EDGE2][KIS] startup ERROR {type(e).__name__}: {e}", flush=True)
 
 
 bootstrap_watchlist()

@@ -1,18 +1,16 @@
-# FINAL EDGE 2 V1.1.0 — KIS Real-Time Bridge
+# FINAL EDGE 2 V1.1.1 — KIS Connection Diagnostics
 
-- KIS 실전 WebSocket 연결
-- 국내주식 KRX 실시간 체결 H0STCNT0
-- 국내주식 KRX 실시간 호가 H0STASP0
-- 기존 1분봉 / V반전 / 돌파 / 급락 엔진 연결
-- 주문 API 없음, ORDERS_ENABLED=False 유지
+V1.1.0 기능은 유지하고 KIS 연결 진단을 강화한 버전입니다.
 
-## Render 필수 환경변수
-- KIS_APP_KEY
-- KIS_APP_SECRET
+추가:
+- Render 로그에 KIS bridge 시작 여부 출력
+- WebSocket approval key 요청/HTTP 상태/성공 여부 출력
+- WebSocket 접속 성공/오류/5초 재시도 출력
+- `/api/kis/status` 진단 endpoint 추가
+- App Key / App Secret 값 자체는 로그/API에 절대 출력하지 않음
+- 주문 기능 없음 (`ORDERS_ENABLED = False`)
 
-선택: KIS_ENABLED=1, EDGE2_BOOTSTRAP=005930:삼성전자:KOSPI:WATCH
-
-키는 GitHub 코드에 직접 입력하지 마세요.
-
-## 확인
-/health 또는 /api/state 에서 kis.connected, kis.approval_ready 확인.
+배포 후 확인:
+1. Render Logs에서 `[EDGE2][KIS]` 검색
+2. 브라우저에서 `/api/kis/status` 확인
+3. `last_error`가 있으면 그 오류만 기준으로 다음 수정 진행
